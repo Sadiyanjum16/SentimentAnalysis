@@ -52,6 +52,19 @@ class SentimentEngine:
             "won't", "wouldn't"
         }
 
+        # Intensifiers amplify sentiment
+        self.intensifiers = {
+            "very", "extremely", "incredibly", "so", "really",
+            "absolutely", "totally", "completely", "utterly",
+            "deeply", "highly", "quite", "rather", "super"
+        }
+
+        # Diminishers weaken sentiment
+        self.diminishers = {
+            "somewhat", "kind", "sort", "rather", "fairly",
+            "quite", "slightly", "a bit", "kinda", "sorta"
+        }
+
     # --------------------------------------------------------
     # TOKENIZATION
     # --------------------------------------------------------
@@ -60,7 +73,7 @@ class SentimentEngine:
         return re.findall(r"[a-zA-Z']+", text.lower())
 
     # --------------------------------------------------------
-    # BASIC WORD-BASED SENTIMENT
+    # ADVANCED SENTENCE-BASED SENTIMENT ANALYSIS
     # --------------------------------------------------------
 
     def analyze(self, text):
@@ -79,6 +92,18 @@ class SentimentEngine:
 
         words = self.tokenize(text)
 
+        if not words:
+            return {
+                "sentiment": "neutral",
+                "confidence": 0.0,
+                "positive_score": 0,
+                "negative_score": 0,
+                "positive_words": [],
+                "negative_words": [],
+                "unknown_words": [],
+                "reason": "No valid words found in text."
+            }
+
         positive_found = []
         negative_found = []
         unknown_found = []
@@ -86,11 +111,11 @@ class SentimentEngine:
         pos = 0
         neg = 0
 
+        # Analyze word by word with context window
         for i, word in enumerate(words):
-
-            previous = words[i - 1] if i > 0 else ""
-
-            is_negated = previous in self.negation_words
+            # Get context window (previous 2 and next 2 words)
+            prev_words = words[max(0, i-2):i]
+            next_words = words[i+1:min(len(words), i+3)]
 
             # Use learned model if available
             learned_pos = self.pos_counts.get(word, 0)
@@ -98,10 +123,8 @@ class SentimentEngine:
 
             # Otherwise use starter word knowledge
             if learned_pos == 0 and learned_neg == 0:
-
                 if word in self.positive_words:
                     learned_pos = 1
-
                 if word in self.negative_words:
                     learned_neg = 1
 
@@ -109,48 +132,68 @@ class SentimentEngine:
                 unknown_found.append(word)
                 continue
 
+            # Calculate sentiment weight based on context
+            weight = 1.0
+
+            # Check for intensifiers (multiplies sentiment)
+            if prev_words and prev_words[-1] in self.intensifiers:
+                weight = 2.0
+            
+            # Check for diminishers (reduces sentiment)
+            if prev_words and prev_words[-1] in self.diminishers:
+                weight = 0.5
+
+            # Check for negation (flips sentiment)
+            is_negated = False
+            for prev_word in prev_words:
+                if prev_word in self.negation_words:
+                    is_negated = True
+                    break
+
+            # Flip sentiment if negated
             if is_negated:
                 learned_pos, learned_neg = learned_neg, learned_pos
 
+            # Add weighted scores
             if learned_pos > learned_neg:
-                pos += learned_pos
+                pos += learned_pos * weight
                 positive_found.append(word)
-
             elif learned_neg > learned_pos:
-                neg += learned_neg
+                neg += learned_neg * weight
                 negative_found.append(word)
 
-            else:
-                # Equal evidence contributes to neither side
-                pass
+        # Remove duplicates while preserving order
+        positive_found = list(dict.fromkeys(positive_found))
+        negative_found = list(dict.fromkeys(negative_found))
 
         total = pos + neg
 
+        # Determine sentiment with confidence
         if total == 0:
             sentiment = "neutral"
             confidence = 0.0
-            reason = "No known sentiment signals were detected."
+            reason = "No sentiment signals were detected. The text appears neutral."
 
         elif pos > neg:
             sentiment = "positive"
-            confidence = pos / total
-            reason = "Positive evidence was stronger than negative evidence."
+            confidence = min(pos / (pos + neg), 1.0)
+            reason = f"Strong positive indicators detected. Positive signals outweigh negative ones."
 
         elif neg > pos:
             sentiment = "negative"
-            confidence = neg / total
-            reason = "Negative evidence was stronger than positive evidence."
+            confidence = min(neg / (pos + neg), 1.0)
+            reason = f"Strong negative indicators detected. Negative signals outweigh positive ones."
 
         else:
             sentiment = "neutral"
             confidence = 0.5
-            reason = "Positive and negative evidence were balanced."
+            reason = "Positive and negative signals are balanced."
 
         return {
             "sentiment": sentiment,
             "confidence": confidence,
-            "positive_score": pos,
-            "negative_score": neg,
+            "positive_score": int(pos),
+            "negative_score": int(neg),
             "positive_words": positive_found,
             "negative_words": negative_found,
             "unknown_words": unknown_found,
@@ -944,6 +987,11 @@ class SentimentApp:
         )
 
         self.analyze_text.bind(
+            "<KeyRelease>",
+            lambda event: self.perform_analysis()
+        )
+
+        self.analyze_text.bind(
             "<Control-Return>",
             lambda event: self.perform_analysis()
         )
@@ -1111,16 +1159,11 @@ class SentimentApp:
         sentiment = result["sentiment"]
         confidence = result["confidence"]
 
-        self.stats["analyses"] += 1
-        self.stats[sentiment] += 1
-
         self.engine.analysis_history.append({
             "text": text,
             "sentiment": sentiment,
             "confidence": confidence
         })
-
-        self.update_dashboard_stats()
 
         if sentiment == "positive":
             display = "POSITIVE"
@@ -1149,16 +1192,30 @@ class SentimentApp:
             text=text
         )
 
+        positive_words = result.get("positive_words", [])
+        negative_words = result.get("negative_words", [])
+        pos_score = result.get("positive_score", 0)
+        neg_score = result.get("negative_score", 0)
+
+        scores_text = f"Positive: {pos_score} | Negative: {neg_score}"
         self.scores_label.configure(
-            text=""
+            text=scores_text
         )
 
+        signal_parts = []
+        if positive_words:
+            signal_parts.append(f"✓ Positive: {', '.join(positive_words)}")
+        if negative_words:
+            signal_parts.append(f"✗ Negative: {', '.join(negative_words)}")
+
+        signal_text = "\n".join(signal_parts) if signal_parts else "No sentiment signals detected."
         self.signal_label.configure(
-            text=""
+            text=signal_text
         )
 
+        reason = result.get("reason", "")
         self.reason_label.configure(
-            text=""
+            text=reason
         )
 
     def clear_analysis(self):
